@@ -1,0 +1,33 @@
+plugins {
+    id 'java'
+}
+
+group = 'jeras'
+version = '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    testImplementation platform('org.junit:junit-bom:5.10.0')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 25
+    options.compilerArgs << "--add-modules" << "jdk.incubator.vector"
+}
+
+tasks.withType(JavaExec).configureEach {
+    jvmArgs += [
+            '--add-modules', 'jdk.incubator.vector',
+            '-XX:+UnlockDiagnosticVMOptions',
+            '-XX:+DebugNonSafepoints'
+    ]
+}
+
+test {
+    useJUnitPlatform()
+    jvmArgs += ['--add-modules', 'jdk.incubator.vector']
+}
