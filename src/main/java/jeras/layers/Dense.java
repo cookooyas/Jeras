@@ -103,4 +103,12 @@ public class Dense implements Layer {
     public int getOutputDim() {
         return this.units;
     }
+
+    public Tensor getWeights() {
+        return this.weights;
+    }
+
+    public Tensor getBias() {
+        return this.bias;
+    }
 }
