@@ -60,6 +60,45 @@ public class Dense implements Layer {
         return output;
     }
 
+    // 역전파
+    public Tensor backward(Tensor input, Tensor gradient, float learningRate) {
+        Tensor weightGrad = new Tensor(this.inputDim, this.units);
+
+        // 경사하강법 기반 오차수정
+        for (int r = 0; r < this.inputDim; r++) {
+            for (int c = 0; c < this.units; c++) {
+                float sumGrad = 0f;
+                for (int b = 0; b < input.rows; b++) {
+                    sumGrad += input.data[b * this.inputDim + r] * gradient.data[b * this.units + c];
+                }
+                // 가중치 업데이트
+                this.weights.data[r * this.units + c] -= learningRate * sumGrad;
+            }
+        }
+
+        // 편향성
+        for (int c = 0; c < this.units; c++) {
+            float sumGrad = 0f;
+            for (int b = 0; b < input.rows; b++) {
+                sumGrad += gradient.data[b * this.units + c];
+            }
+            this.bias.data[c] -= learningRate * sumGrad;
+        }
+
+        Tensor inputGrad = new Tensor(input.rows, this.inputDim);
+        for (int b = 0; b < input.rows; b++) {
+            for (int r = 0; r < this.inputDim; r++) {
+                float sum = 0f;
+                for (int c = 0; c < this.units; c++) {
+                    sum += gradient.data[b * this.units + c] * this.weights.data[r * this.units + c];
+                }
+                inputGrad.data[b * this.inputDim + r] = sum;
+            }
+        }
+
+        return inputGrad;
+    }
+
     @Override
     public int getOutputDim() {
         return this.units;
