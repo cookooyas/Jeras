@@ -6,20 +6,28 @@ import jdk.incubator.vector.VectorSpecies;
 import jdk.incubator.vector.VectorOperators;
 import java.util.Random;
 
+/**
+ * 🧱 [Jeras Layer] 완전 연결 레이어 (Keras의 layers.Dense와 1:1 대응)
+ * 내부적으로 Vector API(SIMD)를 이용한 오차 역전파 및 가중치 업데이트가 자동 캡슐화되어 작동합니다.
+ */
 public class Dense implements Layer {
     private static final VectorSpecies<Float> SPECIES = FloatVector.SPECIES_PREFERRED;
 
-    private int inputDim;   // 🌟 Keras 스타일을 위해 final 제거 (initialize 시점에 할당 가능하도록)
+    private int inputDim;
     private final int outputDim;
     private final String activation;
 
-    public float[] weights;
-    public float[] bias;
-    private boolean isInitialized = false; // 가중치 중복 초기화 방지 플래그
+    // 🌟 가중치와 바이어스를 순수 배열에서 명품 Tensor 객체로 승격
+    private Tensor weightsTensor;
+    private Tensor biasTensor;
+
+    // 🌟 역전파를 위해 순전파 시 들어온 입력을 레이어 내부에 캐싱 (Keras의 연산 그래프 철학)
+    private Tensor lastInput;
+    private boolean isInitialized = false;
 
     /**
-     * [생성자 1] 🌟 JerasKerasStyleTest 호환용 (인수 2개: Keras 스타일)
-     * 입력 차원은 Sequential.add() 내부에서 layer.initialize()가 호출될 때 동적으로 세팅됩니다.
+     * [Keras 스타일 생성자] model.add(new Dense(512, "relu")) 형태로 사용
+     * 입력 차원은 Sequential 파이프라인에 연결될 때 자동으로 빌드됩니다.
      */
     public Dense(int outputDim, String activation) {
         this.outputDim = outputDim;
@@ -27,7 +35,7 @@ public class Dense implements Layer {
     }
 
     /**
-     * [생성자 2] MnistCompleteTrainingTest 호환용 (인수 3개: 명시적 스타일)
+     * [명시적 생성자] 첫 번째 레이어에서 명시적으로 차원을 지정할 때 사용
      */
     public Dense(int inputDim, int outputDim, String activation) {
         this.inputDim = inputDim;
@@ -36,31 +44,32 @@ public class Dense implements Layer {
         allocateAndInitializeWeights();
     }
 
-    /**
-     * Sequential.add() 시점에 프레임워크가 앞 레이어의 차원을 주입하는 곳
-     */
     @Override
     public void initialize(int inputDim) {
         if (!isInitialized) {
             this.inputDim = inputDim;
             allocateAndInitializeWeights();
-        } else if (this.inputDim != inputDim) {
-            System.out.println("⚠️ [Jeras 경고] 입력 차원 불일치 감지: " + this.inputDim + " vs " + inputDim);
         }
     }
 
     /**
-     * 🌟 실제 메모리를 할당하고 He 가중치 초기화를 수행하는 핵심 메서드
+     * 🧠 He Normal (MSRA) 가중치 초기화 알고리즘 기반 텐서 메모리 할당
      */
     private void allocateAndInitializeWeights() {
-        this.weights = new float[inputDim * outputDim];
-        this.bias = new float[outputDim];
+        // 행렬 곱 연산 방향에 맞춰 가중치 형상을 [inputDim, outputDim]으로 세팅
+        this.weightsTensor = new Tensor(inputDim, outputDim);
+        this.biasTensor = new Tensor(1, outputDim); // 바이어스는 출력 차원 크기만큼 전개
 
         Random rand = new Random();
         float stdDev = (float) Math.sqrt(2.0 / inputDim);
-        for (int i = 0; i < weights.length; i++) {
-            weights[i] = (float) (rand.nextGaussian() * stdDev);
+
+        // He 가우시안 초기화 주입
+        for (int i = 0; i < weightsTensor.data.length; i++) {
+            weightsTensor.data[i] = (float) (rand.nextGaussian() * stdDev);
         }
+        // Bias는 Keras 표준에 따라 초기값 0.0으로 맑게 밀어버립니다.
+        biasTensor.fill(0.0f);
+
         this.isInitialized = true;
     }
 
@@ -69,44 +78,23 @@ public class Dense implements Layer {
         return this.outputDim;
     }
 
-    public float[] getWeights() { return this.weights; }
-    public float[] getBias() { return this.bias; }
+    // 외부 노출 API도 Tensor 객체 타겟으로 래핑
+    public Tensor getWeights() { return this.weightsTensor; }
+    public Tensor getBias() { return this.biasTensor; }
 
     /**
-     * SIMD 가속 순전파 및 Safe Activation
+     * ⚡ [Forward] 순전파 파이프라인
      */
     @Override
     public Tensor forward(Tensor input) {
-        int batchSize = input.rows;
-        Tensor output = new Tensor(batchSize, outputDim);
+        // 🌟 [핵심] 오차 역전파 체인을 위해 현재 들어온 입력을 내부에 캐싱합니다.
+        this.lastInput = input;
 
-        for (int b = 0; b < batchSize; b++) {
-            int inputRowOffset = b * inputDim;
-            int outputRowOffset = b * outputDim;
+        // 🌟 복잡한 하드웨어 가속 선형 결합(XW + B) 연산은 Tensor의 고유 코어 엔진에 완전히 위임!
+        Tensor output = input.matMulAndAddBias(this.weightsTensor, this.biasTensor);
 
-            for (int o = 0; o < outputDim; o++) {
-                int weightOffset = o * inputDim;
-
-                FloatVector acc = FloatVector.zero(SPECIES);
-                int upperBound = SPECIES.loopBound(inputDim);
-                int i = 0;
-
-                for (; i < upperBound; i += SPECIES.length()) {
-                    FloatVector vx = FloatVector.fromArray(SPECIES, input.data, inputRowOffset + i);
-                    FloatVector vw = FloatVector.fromArray(SPECIES, weights, weightOffset + i);
-                    acc = vx.fma(vw, acc);
-                }
-
-                float sum = acc.reduceLanes(VectorOperators.ADD);
-
-                for (; i < inputDim; i++) {
-                    sum += input.data[inputRowOffset + i] * weights[weightOffset + i];
-                }
-
-                output.data[outputRowOffset + o] = sum + bias[o];
-            }
-        }
-
+        // 활성화 함수 처리 블록
+        int batchSize = output.rows;
         if (activation.equalsIgnoreCase("relu")) {
             for (int i = 0; i < output.data.length; i++) {
                 output.data[i] = Math.max(0.0f, output.data[i]);
@@ -135,12 +123,21 @@ public class Dense implements Layer {
     }
 
     /**
-     * SIMD 가속 역전파
+     * ⚡ [Backward] 역전파 및 가중치 조율
+     * 🌟 캐싱된 lastInput을 사용하므로, 외부 지휘관(Sequential)은 인수를 덕지덕지 넘길 필요가 없어집니다.
      */
     @Override
-    public Tensor backward(Tensor input, Tensor lossGrad, float lr) {
-        int batchSize = input.rows;
+    public Tensor backward(Tensor lossGrad, float lr) {
+        if (this.lastInput == null) {
+            throw new IllegalStateException("순전파(forward)가 실행되지 않아 역전파 가중치를 계산할 수 없습니다.");
+        }
+
+        int batchSize = this.lastInput.rows;
         Tensor nextGrad = new Tensor(batchSize, inputDim);
+
+        float[] wData = this.weightsTensor.data;
+        float[] bData = this.biasTensor.data;
+        float[] iData = this.lastInput.data;
 
         for (int b = 0; b < batchSize; b++) {
             int inputRowOffset = b * inputDim;
@@ -150,24 +147,26 @@ public class Dense implements Layer {
                 float grad = lossGrad.data[lossRowOffset + o];
                 int weightOffset = o * inputDim;
 
+                // 1. 가중치(Weights) 및 바이어스(Bias) 미세 조율
                 for (int i = 0; i < inputDim; i++) {
-                    weights[weightOffset + i] -= lr * grad * input.data[inputRowOffset + i];
+                    wData[weightOffset + i] -= lr * grad * iData[inputRowOffset + i];
                 }
-                bias[o] -= lr * grad;
+                bData[o] -= lr * grad;
 
+                // 2. Vector API 가속을 통한 상위 레이어 전달용 그라디언트 연산
                 FloatVector vGrad = FloatVector.broadcast(SPECIES, grad);
                 int upperBound = SPECIES.loopBound(inputDim);
                 int i = 0;
 
                 for (; i < upperBound; i += SPECIES.length()) {
-                    FloatVector vw = FloatVector.fromArray(SPECIES, weights, weightOffset + i);
+                    FloatVector vw = FloatVector.fromArray(SPECIES, wData, weightOffset + i);
                     FloatVector vn = FloatVector.fromArray(SPECIES, nextGrad.data, inputRowOffset + i);
                     vn = vw.fma(vGrad, vn);
                     vn.intoArray(nextGrad.data, inputRowOffset + i);
                 }
 
                 for (; i < inputDim; i++) {
-                    nextGrad.data[inputRowOffset + i] += weights[weightOffset + i] * grad;
+                    nextGrad.data[inputRowOffset + i] += wData[weightOffset + i] * grad;
                 }
             }
         }
