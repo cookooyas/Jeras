@@ -14,17 +14,19 @@ public class MnistRealImageInference {
         System.out.println("🖼️ [Jeras v1.4] 스마트 전처리 엔진(Centering & Padding) 가동");
 
         // 1. 모델 아키텍처 정의 (784 -> 256 -> 128 -> 10)
-        Dense layer1 = new Dense(256, "relu");
-        Dense layer2 = new Dense(128, "relu");
-        Dense layer3 = new Dense(10, "softmax");
+        Dense layer1 = new Dense(512, "relu");
+        Dense layer2 = new Dense(256, "relu");
+        Dense layer3 = new Dense(128, "relu");
+        Dense layer4 = new Dense(10, "softmax");
 
         Sequential model = new Sequential(784);
         model.add(layer1);
         model.add(layer2);
         model.add(layer3);
+        model.add(layer4);
 
-        // 2. 가중치 모델 로드
-        String modelPath = "data/jeras_mnist_model.txt";
+        // 🌟 방금 구워진 딥 증강 가중치 파일 로드
+        String modelPath = "data/jeras_mnist_deep_augmented_model.txt";
         model.loadWeights(modelPath);
 
         System.out.println("\n🎯 --- 그림판 손글씨 10종 스마트 검증 시작 ---");
