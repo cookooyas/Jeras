@@ -15,7 +15,7 @@ public class DataLoader implements AutoCloseable {
     private final int batchSize;
     private final int inputDim;
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
-    private final Random rand = new Random(42); // 셔플용 시드 고정
+    private final Random rand = new Random(42); // 셔플용 및 증강용 시드 고정
 
     public DataLoader(int batchSize, int inputDim) {
         this.batchSize = batchSize;
@@ -26,14 +26,14 @@ public class DataLoader implements AutoCloseable {
 
     /**
      * 단 하나의 전담 가상 스레드가 백그라운드에서 안전하게 스트림을 읽으며
-     * 다중 에포크와 데이터 셔플을 처리해 큐를 채웁니다.
+     * 다중 에포크와 데이터 셔플, 그리고 실시간 데이터 증강(Shift)까지 처리해 큐를 채웁니다.
      */
     public void startAsyncLoading(String imagesPath, String labelsPath, int totalSamples, int epochs) {
         executor.submit(() -> {
             try {
                 int numBatches = totalSamples / batchSize;
 
-                // 1. MNIST 데이터셋 전체를 가상 스레드 내부 로컬 버퍼에 원샷 적재 (하드디스크 병목 원천 차단)
+                // 1. MNIST 데이터셋 전체를 가상 스레드 내부 로컬 버퍼에 원샷 적재
                 byte[] allImageBytes = new byte[totalSamples * inputDim];
                 byte[] allLabelBytes = new byte[totalSamples];
 
@@ -70,19 +70,31 @@ public class DataLoader implements AutoCloseable {
 
                         for (int b = 0; b < batchSize; b++) {
                             int sampleIdx = indices[bIdx * batchSize + b];
+                            // 데이터 증강, 픽셀 이동
+                            int shiftX = rand.nextInt(3) - 1;
+                            int shiftY = rand.nextInt(3) - 1;
 
-                            // 이미지 데이터 변환
-                            for (int p = 0; p < inputDim; p++) {
-                                int pixel = allImageBytes[sampleIdx * inputDim + p] & 0xFF;
-                                batchX.data[b * inputDim + p] = pixel / 255.0f;
+                            for (int y = 0; y < 28; y++) {
+                                for (int x = 0; x < 28; x++) {
+                                    int srcY = y + shiftY;
+                                    int srcX = x + shiftX;
+
+                                    int targetPixelIdx = b * inputDim + (y * 28 + x);
+
+                                    if (srcY >= 0 && srcY < 28 && srcX >= 0 && srcX < 28) {
+                                        int srcPixelIdx = sampleIdx * inputDim + (srcY * 28 + srcX);
+                                        int pixel = allImageBytes[srcPixelIdx] & 0xFF;
+                                        batchX.data[targetPixelIdx] = pixel / 255.0f;
+                                    } else {
+                                        batchX.data[targetPixelIdx] = 0.0f;
+                                    }
+                                }
                             }
 
-                            // 정답 원-핫 인코딩 변환
                             int label = allLabelBytes[sampleIdx] & 0xFF;
                             batchY.data[b * 10 + label] = 1.0f;
                         }
 
-                        // 메인 엔진이 가져갈 큐에 대기 주입 (큐가 차면 가상 스레드는 논블로킹 대기)
                         dataQueue.put(new DataBatch(batchX, batchY));
                     }
                 }

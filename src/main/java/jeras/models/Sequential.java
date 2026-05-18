@@ -93,4 +93,8 @@ public class Sequential {
         }
         System.out.println("[Jeras Model] 📂 가중치 모델 로드 및 뇌 세포 복원 완료: " + filePath);
     }
+
+    public List<Layer> getLayers() {
+        return this.layers;
+    }
 }
