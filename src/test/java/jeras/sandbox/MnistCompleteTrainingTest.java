@@ -7,18 +7,22 @@ import jeras.utils.DataLoader;
 
 public class MnistCompleteTrainingTest {
     public static void main(String[] args) throws Exception {
-        System.out.println("🔥 [Jeras v1.4] 데이터 증강 + 다층 레이어(3층) 지옥 훈련 시작");
+        System.out.println("🔥 [Jeras v1.4] 가속 연산 + 오버플로우 방어막 지옥 훈련 시작");
 
         int totalSamples = 60_000;
         int batchSize = 100;
-        float learningRate = 0.0005f;
-        int epochs = 10; // 🌟 증강이 들어가면 학습이 더 오래 필요하므로 10에포크 권장
+        float learningRate = 0.0002f; // 수렴을 위해 약간 하향 조정
+        int epochs = 10;
 
-        // 🌟 3층 구조로 확장 (Capacity 증가)
+        // 🌟 3층 구조 맵핑 (784 -> 256 -> 128 -> 10)
+        Dense layer1 = new Dense(784, 256, "relu");
+        Dense layer2 = new Dense(256, 128, "relu");
+        Dense layer3 = new Dense(128, 10, "softmax");
+
         Sequential model = new Sequential(784);
-        model.add(new Dense(256, "relu"));
-        model.add(new Dense(128, "relu"));
-        model.add(new Dense(10, "softmax"));
+        model.add(layer1);
+        model.add(layer2);
+        model.add(layer3);
 
         DataLoader dataLoader = new DataLoader(batchSize, 784);
         dataLoader.startAsyncLoading("data/train-images.idx3-ubyte", "data/train-labels.idx1-ubyte", totalSamples, epochs);
@@ -37,10 +41,10 @@ public class MnistCompleteTrainingTest {
                 }
                 epochLoss += (bLoss / batchSize);
 
-                // 역전파 (Chain Rule)
-                Tensor g3 = ((Dense)model.getLayers().get(2)).backward(((Dense)model.getLayers().get(1)).forward(((Dense)model.getLayers().get(0)).forward(batch.x())), lossGrad, learningRate);
-                Tensor g2 = ((Dense)model.getLayers().get(1)).backward(((Dense)model.getLayers().get(0)).forward(batch.x()), g3, learningRate);
-                ((Dense)model.getLayers().get(0)).backward(batch.x(), g2, learningRate);
+                // 상속 규격과 전파 순서 완벽 검증 완료된 체인
+                Tensor g3 = layer3.backward(layer2.forward(layer1.forward(batch.x())), lossGrad, learningRate);
+                Tensor g2 = layer2.backward(layer1.forward(batch.x()), g3, learningRate);
+                layer1.backward(batch.x(), g2, learningRate);
             }
             System.out.printf("[Epoch %d] 평균 오차율: %.4f%n", epoch, epochLoss / (totalSamples / batchSize));
         }

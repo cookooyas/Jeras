@@ -3,114 +3,82 @@ package jeras.sandbox;
 import jeras.core.Tensor;
 import jeras.layers.Dense;
 import jeras.models.Sequential;
-
-import javax.imageio.ImageIO;
-import java.awt.Graphics2D;
-import java.awt.Image;
-import java.awt.image.BufferedImage;
-import java.io.File;
-import java.util.Arrays;
+import jeras.utils.DataLoader;
 
 public class MnistQuickInference {
-
-    private static final String IMAGE_PATH = "data/MNIST0.png";
-    private static final String MODEL_PATH = "data/jeras_mnist_model.txt";
-    private static final String DEBUG_OUT_PATH = "data/debug_processed.png";
-
     public static void main(String[] args) throws Exception {
-        System.out.println("==========================================================");
-        System.out.println("🔮 Jeras v1.3 - 정석 전처리 매핑 및 디버그 인퍼런스");
-        System.out.println("==========================================================");
+        System.out.println("📂 [Jeras v1.4] 구워진 뇌세포 복원 및 실전 추론(Inference) 시작");
 
-        // 1. 모델 프레임 구축 및 가중치 이식
+        // 1. 훈련할 때와 완벽히 동일한 구조(Architecture)로 해골물(뼈대)을 만듭니다.
+        // 🌟 Keras 스타일 생성자를 사용하여 Sequential이 알아서 가중치 차원을 매핑하도록 유도합니다.
+        Dense layer1 = new Dense(256, "relu");
+        Dense layer2 = new Dense(128, "relu");
+        Dense layer3 = new Dense(10, "softmax");
+
         Sequential model = new Sequential(784);
-        Dense layer1 = new Dense(128, "relu");
-        Dense layer2 = new Dense(10, "softmax");
         model.add(layer1);
         model.add(layer2);
-        model.loadWeights(MODEL_PATH);
+        model.add(layer3);
 
-        // 2. 원본 이미지 파일 확인 및 로드
-        File file = new File(IMAGE_PATH);
-        if (!file.exists()) {
-            System.err.println("❌ 지정한 경로에 이미지 파일이 없습니다: " + file.getAbsolutePath());
-            return;
-        }
-        BufferedImage rawImg = ImageIO.read(file);
+        // 2. 10에포크 동안 피땀 흘려 저장한 가중치 파일(.txt)을 로드하여 뼈대에 살을 붙입니다.
+        String modelPath = "data/jeras_mnist_model.txt";
+        model.loadWeights(modelPath);
 
-        // 3. 자바 고품질 스케일링으로 28x28 Grayscale 버퍼 생성
-        BufferedImage resizedImg = new BufferedImage(28, 28, BufferedImage.TYPE_BYTE_GRAY);
-        Graphics2D g = resizedImg.createGraphics();
-        // SCALE_SMOOTH를 사용하여 글자가 깨지거나 떡지는 것을 방지합니다.
-        g.drawImage(rawImg.getScaledInstance(28, 28, Image.SCALE_SMOOTH), 0, 0, null);
-        g.dispose();
+        // 3. 추론에 사용할 테스트 데이터셋 로드 (원하는 샘플 수만큼 가볍게 로딩)
+        // 여기서는 검증을 위해 train 데이터에서 앞단 100장만 가져와 테스트해 봅니다.
+        int testSamples = 100;
+        int batchSize = 1; // 한 장씩 꼼꼼하게 추론하기 위해 배치 크기를 1로 설정
 
-        // 4. [정석 전처리] 과도한 부스트나 팽창 없이 MNIST 표준 스타일로 순수 변환
-        Tensor inputTensor = new Tensor(1, 784);
-        for (int y = 0; y < 28; y++) {
-            for (int x = 0; x < 28; x++) {
-                int brightness = resizedImg.getRGB(x, y) & 0xFF;
+        DataLoader dataLoader = new DataLoader(batchSize, 784);
+        dataLoader.startAsyncLoading("data/train-images.idx3-ubyte", "data/train-labels.idx1-ubyte", testSamples, 1);
 
-                // 배경 흰색(255) -> 0.0(검은색), 글씨 검은색(0) -> 1.0(흰색)
-                float normalized = (255 - brightness) / 255.0f;
+        int correctPredictions = 0;
 
-                // 💡 미세한 배경 노이즈(예: 스캔이나 캡처 시 생기는 미세한 흔들림)만 커트라인(0.1)으로 날려줍니다.
-                if (normalized < 0.1f) {
-                    normalized = 0.0f;
+        System.out.println("\n🎯 --- 실전 개별 이미지 추론 테스트 시작 ---");
+
+        for (int i = 1; i <= testSamples; i++) {
+            DataLoader.DataBatch batch = dataLoader.nextBatch();
+
+            // 🌟 모델의 순전파(predict)만 가동하여 0~9까지의 확률 분포를 얻습니다.
+            Tensor output = model.predict(batch.x());
+
+            // AI의 예측값(가장 확률이 높은 인덱스) 찾기
+            int predictedDigit = 0;
+            float maxProb = output.data[0];
+            for (int o = 1; o < 10; o++) {
+                if (output.data[o] > maxProb) {
+                    maxProb = output.data[o];
+                    predictedDigit = o;
                 }
-
-                inputTensor.data[y * 28 + x] = normalized;
             }
-        }
-        System.out.println("[ImageProcessor] 📷 원본 이미지의 기하학적 곡선을 그대로 유지하며 텐서 변환 완료.");
 
-        // 5. AI가 바라보는 28x28 상태를 실제 이미지 파일로 저장하기 (검증용)
-        BufferedImage debugImg = new BufferedImage(28, 28, BufferedImage.TYPE_BYTE_GRAY);
-        for (int y = 0; y < 28; y++) {
-            for (int x = 0; x < 28; x++) {
-                float val = inputTensor.data[y * 28 + x];
-                int pixelValue = (int) (val * 255);
-                int rgb = (pixelValue << 16) | (pixelValue << 8) | pixelValue;
-                debugImg.setRGB(x, y, rgb);
+            // 실제 정답(Label) 찾기 (원핫 인코딩에서 1인 위치 찾기)
+            int actualDigit = 0;
+            for (int o = 0; o < 10; o++) {
+                if (batch.y().data[o] == 1.0f) {
+                    actualDigit = o;
+                    break;
+                }
             }
-        }
-        File debugFile = new File(DEBUG_OUT_PATH);
-        ImageIO.write(debugImg, "png", debugFile);
-        System.out.println("[DebugSystem] 💾 정석 전처리 스냅샷 재저장 완료: " + debugFile.getAbsolutePath());
 
-        // 6. 👀 콘솔창에 텍스트 그래픽으로 실시간 매트릭스 시각화 출력
-        System.out.println("\n🖥️ [콘솔 시각화 - 떡진 현상이 해결된 28x28 상(像)]");
-        for (int y = 0; y < 28; y++) {
-            for (int x = 0; x < 28; x++) {
-                float val = inputTensor.data[y * 28 + x];
-                if (val > 0.5f) System.out.print("■");
-                else if (val > 0.1f) System.out.print("▨");
-                else System.out.print(" ");
+            // 결과 비교 및 출력 (상위 10개만 콘솔에 디테일하게 출력)
+            if (i <= 10) {
+                System.out.printf("[%02d번 이미지] AI 예측: %d (확률: %.2f%%) | 실제 정답: %d -> %s%n",
+                        i, predictedDigit, maxProb * 100f, actualDigit,
+                        (predictedDigit == actualDigit) ? "정답! 🎉" : "오답.. 😭");
             }
-            System.out.println();
-        }
-        System.out.println();
 
-        // 7. 가속 엔진 추론 가동
-        long startTime = System.nanoTime();
-        Tensor prediction = model.predict(inputTensor);
-        long endTime = System.nanoTime();
-
-        // 8. 확률 분포 분석 및 최종 인덱스 매칭
-        int predictedDigit = -1;
-        float maxConfidence = -1f;
-        for (int i = 0; i < 10; i++) {
-            if (prediction.data[i] > maxConfidence) {
-                maxConfidence = prediction.data[i];
-                predictedDigit = i;
+            if (predictedDigit == actualDigit) {
+                correctPredictions++;
             }
         }
 
-        System.out.println("==========================================================");
-        System.out.printf("🎯 AI 최종 판독 결과: [%d] %n", predictedDigit);
-        System.out.printf("📊 판독 확신도 (Confidence): %.2f%%%n", maxConfidence * 100);
-        System.out.printf("⏱️ 순수 추론 연산 타임: %.4f ms%n", (endTime - startTime) / 1_000_000.0);
-        System.out.println("🔢 전체 클래스별 확률 분포: " + Arrays.toString(prediction.data));
-        System.out.println("==========================================================");
+        // 4. 최종 정확도(Accuracy) 산출
+        float accuracy = ((float) correctPredictions / testSamples) * 100f;
+        System.out.println("----------------------------------------");
+        System.out.printf("📊 [최종 검증 결과] 총 %d장 중 %d장 맞춤 | 모델 정확도: %.2f%%%n",
+                testSamples, correctPredictions, accuracy);
+
+        dataLoader.close();
     }
 }
