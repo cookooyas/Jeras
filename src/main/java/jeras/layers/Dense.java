@@ -17,17 +17,15 @@ public class Dense implements Layer {
     private final int outputDim;
     private final String activation;
 
-    // 🌟 가중치와 바이어스를 순수 배열에서 명품 Tensor 객체로 승격
     private Tensor weightsTensor;
     private Tensor biasTensor;
 
-    // 🌟 역전파를 위해 순전파 시 들어온 입력을 레이어 내부에 캐싱 (Keras의 연산 그래프 철학)
     private Tensor lastInput;
+    private Tensor lastOutput; // 🌟 Leaky ReLU 역전파 정밀 미분을 위해 순전파 출력 저장용 추가
     private boolean isInitialized = false;
 
     /**
      * [Keras 스타일 생성자] model.add(new Dense(512, "relu")) 형태로 사용
-     * 입력 차원은 Sequential 파이프라인에 연결될 때 자동으로 빌드됩니다.
      */
     public Dense(int outputDim, String activation) {
         this.outputDim = outputDim;
@@ -56,18 +54,18 @@ public class Dense implements Layer {
      * 🧠 He Normal (MSRA) 가중치 초기화 알고리즘 기반 텐서 메모리 할당
      */
     private void allocateAndInitializeWeights() {
-        // 행렬 곱 연산 방향에 맞춰 가중치 형상을 [inputDim, outputDim]으로 세팅
         this.weightsTensor = new Tensor(inputDim, outputDim);
-        this.biasTensor = new Tensor(1, outputDim); // 바이어스는 출력 차원 크기만큼 전개
+        this.biasTensor = new Tensor(1, outputDim);
 
         Random rand = new Random();
         float stdDev = (float) Math.sqrt(2.0 / inputDim);
 
-        // He 가우시안 초기화 주입
+        // He 가우시안 초기화 정밀 조율
         for (int i = 0; i < weightsTensor.data.length; i++) {
             weightsTensor.data[i] = (float) (rand.nextGaussian() * stdDev);
         }
-        // Bias는 Keras 표준에 따라 초기값 0.0으로 맑게 밀어버립니다.
+
+        // Bias는 0으로 초기화
         biasTensor.fill(0.0f);
 
         this.isInitialized = true;
@@ -78,7 +76,6 @@ public class Dense implements Layer {
         return this.outputDim;
     }
 
-    // 외부 노출 API도 Tensor 객체 타겟으로 래핑
     public Tensor getWeights() { return this.weightsTensor; }
     public Tensor getBias() { return this.biasTensor; }
 
@@ -87,17 +84,15 @@ public class Dense implements Layer {
      */
     @Override
     public Tensor forward(Tensor input) {
-        // 🌟 [핵심] 오차 역전파 체인을 위해 현재 들어온 입력을 내부에 캐싱합니다.
         this.lastInput = input;
 
-        // 🌟 복잡한 하드웨어 가속 선형 결합(XW + B) 연산은 Tensor의 고유 코어 엔진에 완전히 위임!
+        // XW + B 선형 결합 가속 엔진
         Tensor output = input.matMulAndAddBias(this.weightsTensor, this.biasTensor);
 
-        // 활성화 함수 처리 블록
         int batchSize = output.rows;
         if (activation.equalsIgnoreCase("relu")) {
             for (int i = 0; i < output.data.length; i++) {
-                output.data[i] = Math.max(0.0f, output.data[i]);
+                if (output.data[i] < 0) output.data[i] *= 0.01f; // Leaky ReLU 결합 유지
             }
         } else if (activation.equalsIgnoreCase("softmax")) {
             for (int b = 0; b < batchSize; b++) {
@@ -119,16 +114,20 @@ public class Dense implements Layer {
                 }
             }
         }
+
+        // 🌟 역전파 활성화 미분 시 변형 전 원본 출력을 대조하기 위해 깊은 복사 보관
+        this.lastOutput = new Tensor(output.rows, output.cols);
+        System.arraycopy(output.data, 0, this.lastOutput.data, 0, output.data.length);
+
         return output;
     }
 
     /**
-     * ⚡ [Backward] 역전파 및 가중치 조율
-     * 🌟 캐싱된 lastInput을 사용하므로, 외부 지휘관(Sequential)은 인수를 덕지덕지 넘길 필요가 없어집니다.
+     * ⚡ [Backward] 역전파 및 가중치 조율 (오염 없는 정밀 체인 버전)
      */
     @Override
     public Tensor backward(Tensor lossGrad, float lr) {
-        if (this.lastInput == null) {
+        if (this.lastInput == null || this.lastOutput == null) {
             throw new IllegalStateException("순전파(forward)가 실행되지 않아 역전파 가중치를 계산할 수 없습니다.");
         }
 
@@ -138,22 +137,28 @@ public class Dense implements Layer {
         float[] wData = this.weightsTensor.data;
         float[] bData = this.biasTensor.data;
         float[] iData = this.lastInput.data;
+        float[] oData = this.lastOutput.data;
 
         for (int b = 0; b < batchSize; b++) {
             int inputRowOffset = b * inputDim;
             int lossRowOffset = b * outputDim;
 
             for (int o = 0; o < outputDim; o++) {
-                float grad = lossGrad.data[lossRowOffset + o];
+                int lossIdx = lossRowOffset + o;
+                float grad = lossGrad.data[lossIdx];
+
+                // 🌟 [안정화 추가] 1. Activation (Leaky ReLU) 백프로퍼게이션 미분 필터 적용
+                if (activation.equalsIgnoreCase("relu")) {
+                    if (oData[lossIdx] <= 0f) {
+                        grad *= 0.01f; // 순전파 때 꺾인 지점은 에러도 0.01배만 통과
+                    }
+                }
+
+                // Gradient Clipping 가드
+                grad = Math.max(-15.0f, Math.min(15.0f, grad));
                 int weightOffset = o * inputDim;
 
-                // 1. 가중치(Weights) 및 바이어스(Bias) 미세 조율
-                for (int i = 0; i < inputDim; i++) {
-                    wData[weightOffset + i] -= lr * grad * iData[inputRowOffset + i];
-                }
-                bData[o] -= lr * grad;
-
-                // 2. Vector API 가속을 통한 상위 레이어 전달용 그라디언트 연산
+                // 🌟 [순서 대수술] 2. 오염되지 않은 가중치 상태일 때 상위 레이어 전달용 그라디언트(nextGrad)를 먼저 연산!
                 FloatVector vGrad = FloatVector.broadcast(SPECIES, grad);
                 int upperBound = SPECIES.loopBound(inputDim);
                 int i = 0;
@@ -161,13 +166,27 @@ public class Dense implements Layer {
                 for (; i < upperBound; i += SPECIES.length()) {
                     FloatVector vw = FloatVector.fromArray(SPECIES, wData, weightOffset + i);
                     FloatVector vn = FloatVector.fromArray(SPECIES, nextGrad.data, inputRowOffset + i);
+
                     vn = vw.fma(vGrad, vn);
                     vn.intoArray(nextGrad.data, inputRowOffset + i);
                 }
 
+                // 나머지 테일 루프 스칼라 연산 처리
                 for (; i < inputDim; i++) {
                     nextGrad.data[inputRowOffset + i] += wData[weightOffset + i] * grad;
                 }
+
+                // 🌟 3. 에러 패싱이 완벽히 끝난 후, 가중치(Weights)와 바이어스(Bias)를 안전하게 갱신
+                for (int j = 0; j < inputDim; j++) {
+                    wData[weightOffset + j] -= lr * grad * iData[inputRowOffset + j];
+                }
+                bData[o] -= lr * grad;
+            }
+
+            // 상위 레이어로 전달할 최종 결과물 배열 단위 클리핑 바인딩
+            for (int i = 0; i < inputDim; i++) {
+                int targetIdx = inputRowOffset + i;
+                nextGrad.data[targetIdx] = Math.max(-5.0f, Math.min(5.0f, nextGrad.data[targetIdx]));
             }
         }
         return nextGrad;
